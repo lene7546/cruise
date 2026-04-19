@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cruise Port Map</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root {
+      --bg: #0f1220;
+      --panel: rgba(255,255,255,0.96);
+      --text: #1e2430;
+      --muted: #667085;
+      --border: #d8dbe5;
+    }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: Inter, Arial, sans-serif;
+      background: var(--bg);
+    }
+
+    #app {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      height: 100vh;
+    }
+
+    #sidebar {
+      padding: 18px;
+      border-right: 1px solid var(--border);
+      overflow: auto;
+      background: var(--panel);
+      color: var(--text);
+      box-sizing: border-box;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    h1 {
+      margin: 0 0 10px 0;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+
+    .sub {
+      margin: 0 0 14px 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      margin: 14px 0 6px;
+      font-weight: 700;
+    }
+
+    select, button {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      box-sizing: border-box;
+    }
+
+    button {
+      margin-top: 14px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .stats {
+      margin-top: 14px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .leaflet-popup-content {
+      margin: 12px 14px;
+      line-height: 1.45;
+      min-width: 220px;
+    }
+
+    .popup-title {
+      font-weight: 800;
+      font-size: 15px;
+      margin-bottom: 6px;
+    }
+
+    .popup-row {
+      margin-top: 4px;
+      font-size: 13px;
+    }
+
+    .popup-row strong {
+      font-weight: 700;
+    }
+
+    .link-row {
+      margin-top: 8px;
+      font-size: 13px;
+    }
+
+    .legend-note {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    @media (max-width: 900px) {
+      #app {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+      }
+
+      #sidebar {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      #map {
+        min-height: 65vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="sidebar">
+      <h1>Cruise Port Map</h1>
+      <p class="sub">Filter by ship, cruise line, or day. Click a port to see the ship, port, date, and who else is in port that same day.</p>
+
+      <label for="shipFilter">Ship</label>
+      <select id="shipFilter">
+        <option value="">All ships</option>
+      </select>
+
+      <label for="lineFilter">Cruise line</label>
+      <select id="lineFilter">
+        <option value="">All cruise lines</option>
+      </select>
+
+      <label for="dateFilter">Date</label>
+      <select id="dateFilter">
+        <option value="">All dates</option>
+      </select>
+
+      <button id="resetBtn" type="button">Reset filters</button>
+
+      <div class="stats" id="stats"></div>
+      <div class="legend-note">
+        Routes are shown as line segments between consecutive stops. Points are the main interaction layer.
+      </div>
+    </div>
+
+    <div id="map"></div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([24.8, -76.8], 5);
+
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let portsData = null;
+    let routesData = null;
+    let portsLayer = null;
+    let routesLayer = null;
+
+    const shipFilter = document.getElementById('shipFilter');
+    const lineFilter = document.getElementById('lineFilter');
+    const dateFilter = document.getElementById('dateFilter');
+    const resetBtn = document.getElementById('resetBtn');
+    const stats = document.getElementById('stats');
+
+    const lineColors = {
+      "Carnival": "#d63b3b",
+      "Celebrity": "#2d5baf",
+      "MSC": "#4b3ca7",
+      "Royal Caribbean": "#1a8f6a",
+      "_default": "#444b5a"
+    };
+
+    function colorForCruiseLine(name) {
+      return lineColors[name] || lineColors["_default"];
+    }
+
+    function uniqueValues(features, key) {
+      return [...new Set(features.map(f => f.properties?.[key]).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+    }
+
+    function fillSelect(selectEl, values) {
+      values.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = v;
+        selectEl.appendChild(opt);
+      });
+    }
+
+    function segmentMatchesDate(segmentProps, selectedDate) {
+      if (!selectedDate) return true;
+      const days = Array.isArray(segmentProps.segment_days) ? segmentProps.segment_days : [];
+      return days.includes(selectedDate);
+    }
+
+    function featureMatchesFilters(props, isRoute = false) {
+      const shipOk = !shipFilter.value || props.ship === shipFilter.value;
+      const lineOk = !lineFilter.value || props.cruise_line === lineFilter.value;
+      const dateOk = isRoute ? segmentMatchesDate(props, dateFilter.value)
+                             : (!dateFilter.value || props.day_key === dateFilter.value);
+      return shipOk && lineOk && dateOk;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function portPopupHtml(p) {
+      const linkHtml = p.itinerary_link
+        ? `<div class="link-row"><a href="${escapeHtml(p.itinerary_link)}" target="_blank" rel="noopener noreferrer">Open itinerary link</a></div>`
+        : "";
+      return `
+        <div class="popup-title">${escapeHtml(p.ship)}</div>
+        <div class="popup-row"><strong>Cruise line:</strong> ${escapeHtml(p.cruise_line)}</div>
+        <div class="popup-row"><strong>Date:</strong> ${escapeHtml(p.display_date || p.day_key)}</div>
+        <div class="popup-row"><strong>Port:</strong> ${escapeHtml(p.port_name)}</div>
+        <div class="popup-row"><strong>Also in port:</strong> ${escapeHtml(p.ships_at_port_same_day || "—")}</div>
+        ${linkHtml}
+      `;
+    }
+
+    function routePopupHtml(p) {
+      return `
+        <div class="popup-title">${escapeHtml(p.ship)}</div>
+        <div class="popup-row"><strong>Cruise line:</strong> ${escapeHtml(p.cruise_line)}</div>
+        <div class="popup-row"><strong>Segment:</strong> ${escapeHtml(p.from_port)} → ${escapeHtml(p.to_port)}</div>
+        <div class="popup-row"><strong>Dates:</strong> ${escapeHtml(p.from_display_date)} → ${escapeHtml(p.to_display_date)}</div>
+      `;
+    }
+
+    function render() {
+      if (portsLayer) map.removeLayer(portsLayer);
+      if (routesLayer) map.removeLayer(routesLayer);
+
+      routesLayer = L.geoJSON(routesData, {
+        filter: feature => featureMatchesFilters(feature.properties, true),
+        style: feature => ({
+          color: colorForCruiseLine(feature.properties.cruise_line),
+          weight: 3,
+          opacity: 0.7
+        }),
+        onEachFeature: (feature, layer) => {
+          layer.bindPopup(routePopupHtml(feature.properties));
+        }
+      }).addTo(map);
+
+      portsLayer = L.geoJSON(portsData, {
+        filter: feature => featureMatchesFilters(feature.properties, false),
+        pointToLayer: (feature, latlng) => {
+          return L.circleMarker(latlng, {
+            radius: 6,
+            weight: 1,
+            color: "#ffffff",
+            fillColor: colorForCruiseLine(feature.properties.cruise_line),
+            fillOpacity: 0.95
+          });
+        },
+        onEachFeature: (feature, layer) => {
+          layer.bindPopup(portPopupHtml(feature.properties));
+        }
+      }).addTo(map);
+
+      const portCount = portsLayer.getLayers().length;
+      const routeCount = routesLayer.getLayers().length;
+      stats.innerHTML = `<strong>${portCount}</strong> visible ports<br><strong>${routeCount}</strong> visible route segments`;
+
+      const group = L.featureGroup([routesLayer, portsLayer]);
+      if (group.getLayers().length) {
+        map.fitBounds(group.getBounds().pad(0.15));
+      }
+    }
+
+    Promise.all([
+      fetch('./ports.geojson').then(r => r.json()),
+      fetch('./routes.geojson').then(r => r.json())
+    ]).then(([ports, routes]) => {
+      portsData = ports;
+      routesData = routes;
+
+      fillSelect(shipFilter, uniqueValues(ports.features, 'ship'));
+      fillSelect(lineFilter, uniqueValues(ports.features, 'cruise_line'));
+      fillSelect(dateFilter, uniqueValues(ports.features, 'day_key'));
+
+      render();
+
+      shipFilter.addEventListener('change', render);
+      lineFilter.addEventListener('change', render);
+      dateFilter.addEventListener('change', render);
+
+      resetBtn.addEventListener('click', () => {
+        shipFilter.value = '';
+        lineFilter.value = '';
+        dateFilter.value = '';
+        render();
+      });
+    }).catch(err => {
+      console.error(err);
+      stats.textContent = "Could not load ports.geojson or routes.geojson. Keep all three files in the same folder.";
+    });
+  </script>
+</body>
+</html>
